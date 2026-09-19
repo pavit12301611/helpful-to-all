@@ -1,0 +1,1694 @@
+// OpenHub Prisma schema
+// ---------------------------------------------------------------------------
+// Design rules (important for portability & self-hosting):
+//   1. The canonical provider is PostgreSQL (see `datasource db`).
+//   2. The schema deliberately avoids provider-specific features (no enums, no
+//      Json columns, no scalar arrays, no @db.* attributes) so the exact same
+//      model can be generated for SQLite for zero-setup local development
+//      (`npm run sqlite:setup`, see scripts/make-sqlite-schema.mjs).
+//   3. Enum-like values are stored as strings and validated with Zod in
+//      src/lib/enums.ts - the single source of truth for allowed values.
+//   4. Money is stored as integer minor units (`*Cents`) to avoid float errors.
+//   5. Polymorphic targets (comments / votes / reports / saved items / files)
+//      use `targetType` + `targetId` with the allowed values defined in
+//      src/lib/enums.ts.
+//   6. Soft deletes use `deletedAt`; moderation uses `hiddenAt`.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ===========================================================================
+// Identity, roles, sessions
+// ===========================================================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  username      String    @unique
+  passwordHash  String
+  /// Key of a Role row: user | student | volunteer | organizer | business | moderator | admin
+  role          String    @default("user")
+  emailVerified DateTime?
+  isActive      Boolean   @default(true)
+  isSuspended   Boolean   @default(false)
+  suspendedReason String?
+  locale        String    @default("en")
+  theme         String    @default("system")
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  profile            Profile?
+  accounts           Account[]
+  sessions           Session[]
+  notifications      Notification[]
+  notificationPrefs  NotificationPreference?
+  dashboard          DashboardPreference?
+  tasks              Task[]                @relation("TaskOwner")
+  assignedTasks      Task[]                @relation("TaskAssignee")
+  subtasks           Subtask[]
+  notes              Note[]
+  habits             Habit[]
+  bookmarks          Bookmark[]
+  calendarEvents     CalendarEvent[]
+  expenses           Expense[]
+  expenseSplits      ExpenseSplit[]
+  groupsOwned        Group[]               @relation("GroupOwner")
+  memberships        GroupMember[]
+  invitationsSent    GroupInvitation[]
+  joinRequests       GroupJoinRequest[]
+  groupPosts         GroupPost[]
+  shoppingItems      ShoppingItem[]
+  helpRequests       HelpRequest[]
+  helpResponses      HelpResponse[]
+  comments           Comment[]
+  votes              Vote[]
+  tags               UserTag[]
+  studentResources   StudentResource[]
+  flashcardDecks     FlashcardDeck[]
+  flashcards         Flashcard[]
+  assignments        Assignment[]
+  exams              Exam[]
+  timetableSlots     TimetableSlot[]
+  courseGrades       CourseGrade[]
+  skillOffers        SkillOffer[]
+  skillRequests      SkillRequest[]
+  connectionsSent    SkillConnection[]     @relation("ConnectionFrom")
+  connectionsReceived SkillConnection[]    @relation("ConnectionTo")
+  reviewsWritten     SkillReview[]         @relation("ReviewAuthor")
+  reviewsReceived    SkillReview[]         @relation("ReviewSubject")
+  resourceReviews    ResourceReview[]
+  resourceSuggestions ResourceEditSuggestion[]
+  resourcesSubmitted LocalResource[]       @relation("ResourceSubmitter")
+  resourcesVerified  LocalResource[]       @relation("ResourceVerifier")
+  opportunities      VolunteerOpportunity[]
+  volunteerSignups   VolunteerSignup[]
+  donationCampaigns  DonationCampaign[]
+  campaignUpdates    CampaignUpdate[]
+  bloodDonorProfile  BloodDonorProfile?
+  emergencyContacts  EmergencyContact[]
+  businessProfile    BusinessProfile?
+  tripsOwned         Trip[]                @relation("TripOwner")
+  tripMemberships    TripMember[]
+  itineraryItems     ItineraryItem[]
+  packingItems       PackingItem[]
+  conversationParts  ConversationParticipant[]
+  messages           Message[]
+  reportsFiled       Report[]              @relation("Reporter")
+  reportsReviewed    Report[]              @relation("Reviewer")
+  moderationActions  ModerationAction[]
+  auditLogs          AuditLog[]
+  savedItems         SavedItem[]
+  activityLogs       ActivityLog[]
+  files              File[]
+  missingPersons     MissingPerson[]
+  pollVotes          PollVote[]
+  polls              Poll[]
+  blocksMade         UserBlock[]           @relation("Blocker")
+  blocksReceived     UserBlock[]           @relation("Blocked")
+  verifiedProfiles   Profile[]             @relation("Verifier")
+
+  @@index([role])
+  @@index([createdAt])
+}
+
+/// RBAC role definition (source of truth for permissions).
+model Role {
+  id          String             @id @default(cuid())
+  key         String             @unique
+  name        String
+  description String
+  isSystem    Boolean            @default(true)
+  permissions RolePermission[]
+  createdAt   DateTime           @default(now())
+}
+
+model Permission {
+  id          String             @id @default(cuid())
+  key         String             @unique
+  description String
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  id           String   @id @default(cuid())
+  roleId       String
+  permissionId String
+  role         Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+}
+
+/// Reserved for future external identity providers (OAuth). Unused by default so
+/// OpenHub can run with zero third-party services.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  accessToken       String?
+  refreshToken      String?
+  expiresAt         DateTime?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+/// Server side sessions. Only a hash of the cookie token is stored.
+model Session {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  userAgent  String?
+  ipHash     String?
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Profile {
+  id                 String    @id @default(cuid())
+  userId             String    @unique
+  displayName        String
+  avatarUrl          String?
+  bio                String?
+  city               String?
+  country            String?
+  /// Approximate coordinates used for "near me" features. Never the home address.
+  latitude           Float?
+  longitude          Float?
+  /// CSV of user types: student, volunteer, organizer, business, neighbour, freelancer
+  userTypes          String    @default("")
+  availability       String?
+  /// unverified | pending | verified
+  verificationStatus String    @default("unverified")
+  verifiedAt         DateTime?
+  verifiedById       String?
+  helpfulnessScore   Int       @default(0)
+  /// Profile visibility / privacy controls
+  profileVisibility  String    @default("public")
+  showLocation       Boolean   @default(false)
+  showOnlineStatus   Boolean   @default(false)
+  showActivity       Boolean   @default(true)
+  searchable         Boolean   @default(true)
+  allowMessages      String    @default("everyone")
+  showGroupMembership Boolean  @default(true)
+  website            String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verifier           User?     @relation("Verifier", fields: [verifiedById], references: [id])
+
+  @@index([city])
+  @@index([verificationStatus])
+}
+
+/// Tag with a kind: skill | interest | language | topic
+model Tag {
+  id    String    @id @default(cuid())
+  kind  String
+  slug  String
+  label String
+  users UserTag[]
+
+  @@unique([kind, slug])
+}
+
+model UserTag {
+  id     String @id @default(cuid())
+  userId String
+  tagId  String
+  /// For skills: beginner | intermediate | advanced | expert
+  level  String?
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tagId])
+}
+
+model DashboardPreference {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  /// compact | comfortable
+  layout        String   @default("comfortable")
+  defaultModule String   @default("dashboard")
+  /// JSON array: [{ "key": "tasks", "visible": true, "order": 0 }]
+  widgets       String   @default("[]")
+  /// CSV of pinned tool slugs
+  pinnedTools   String   @default("")
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ===========================================================================
+// Personal productivity
+// ===========================================================================
+
+model Task {
+  id          String    @id @default(cuid())
+  ownerId     String
+  groupId     String?
+  assigneeId  String?
+  title       String
+  description String?
+  dueAt       DateTime?
+  /// low | medium | high | urgent
+  priority    String    @default("medium")
+  /// none | daily | weekly | monthly
+  recurrence  String    @default("none")
+  labels      String    @default("")
+  completedAt DateTime?
+  archivedAt  DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  owner       User      @relation("TaskOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  assignee    User?     @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  group       Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  subtasks    Subtask[]
+
+  @@index([ownerId, completedAt])
+  @@index([dueAt])
+  @@index([groupId])
+}
+
+model Subtask {
+  id          String    @id @default(cuid())
+  taskId      String
+  ownerId     String
+  title       String
+  position    Int       @default(0)
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  task        Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+}
+
+model Note {
+  id         String    @id @default(cuid())
+  ownerId    String
+  title      String
+  body       String    @default("")
+  tags       String    @default("")
+  pinned     Boolean   @default(false)
+  archivedAt DateTime?
+  deletedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  owner      User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, pinned])
+}
+
+model Habit {
+  id          String     @id @default(cuid())
+  ownerId     String
+  title       String
+  description String?
+  /// daily | weekly
+  frequency   String     @default("daily")
+  targetCount Int        @default(1)
+  archivedAt  DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  owner       User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  logs        HabitLog[]
+
+  @@index([ownerId])
+}
+
+model HabitLog {
+  id        String   @id @default(cuid())
+  habitId   String
+  /// Calendar day in YYYY-MM-DD (local to the user)
+  day       String
+  count     Int      @default(1)
+  createdAt DateTime @default(now())
+  habit     Habit    @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  @@unique([habitId, day])
+}
+
+model Bookmark {
+  id          String    @id @default(cuid())
+  ownerId     String
+  url         String
+  title       String
+  description String?
+  category    String?
+  tags        String    @default("")
+  favorite    Boolean   @default(false)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, favorite])
+}
+
+model CalendarEvent {
+  id                String    @id @default(cuid())
+  ownerId           String
+  groupId           String?
+  tripId            String?
+  title             String
+  description       String?
+  location          String?
+  startsAt          DateTime
+  endsAt            DateTime?
+  allDay            Boolean   @default(false)
+  reminderMinutes   Int?
+  /// none | daily | weekly | monthly
+  recurrence        String    @default("none")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  owner             User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  group             Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trip              Trip?     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, startsAt])
+}
+
+// ===========================================================================
+// Groups
+// ===========================================================================
+
+model Group {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  description String?
+  avatarUrl   String?
+  /// friends | family | class | club | neighborhood | organization | team | travel
+  kind        String    @default("friends")
+  /// public | private | invite
+  visibility  String    @default("private")
+  ownerId     String
+  archivedAt  DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  owner       User      @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     GroupMember[]
+  invitations GroupInvitation[]
+  joinRequests GroupJoinRequest[]
+  posts       GroupPost[]
+  polls       Poll[]
+  tasks       Task[]
+  events      CalendarEvent[]
+  expenses    Expense[]
+  shoppingItems ShoppingItem[]
+  files       File[]
+
+  @@index([visibility])
+  @@index([ownerId])
+}
+
+model GroupMember {
+  id         String    @id @default(cuid())
+  groupId    String
+  userId     String
+  /// owner | admin | moderator | member
+  role       String    @default("member")
+  joinedAt   DateTime  @default(now())
+  lastReadAt DateTime?
+  group      Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+model GroupInvitation {
+  id         String    @id @default(cuid())
+  groupId    String
+  email      String?
+  token      String    @unique
+  role       String    @default("member")
+  invitedById String
+  message    String?
+  expiresAt  DateTime?
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  group      Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  invitedBy  User      @relation(fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+}
+
+model GroupJoinRequest {
+  id         String    @id @default(cuid())
+  groupId    String
+  userId     String
+  message    String?
+  /// pending | approved | rejected
+  status     String    @default("pending")
+  reviewedById String?
+  createdAt  DateTime  @default(now())
+  group      Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+}
+
+model GroupPost {
+  id        String    @id @default(cuid())
+  groupId   String
+  authorId  String
+  title     String
+  body      String    @default("")
+  /// post | announcement | poll
+  kind      String    @default("post")
+  pinned    Boolean   @default(false)
+  locked    Boolean   @default(false)
+  hiddenAt  DateTime?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, createdAt])
+}
+
+model ShoppingItem {
+  id          String    @id @default(cuid())
+  groupId     String
+  label       String
+  quantity    String?
+  addedById   String
+  purchasedAt DateTime?
+  createdAt   DateTime  @default(now())
+  group       Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  addedBy     User      @relation(fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@index([groupId, purchasedAt])
+}
+
+// ===========================================================================
+// Community help (Q&A / requests / offers)
+// ===========================================================================
+
+model HelpRequest {
+  id                 String        @id @default(cuid())
+  authorId           String
+  title              String
+  body               String
+  category           String
+  tags               String        @default("")
+  /// question | request | offer
+  kind               String        @default("question")
+  /// low | normal | high | urgent
+  urgency            String        @default("normal")
+  /// public | private
+  visibility         String        @default("public")
+  city               String?
+  country            String?
+  /// open | in_progress | solved | closed
+  status             String        @default("open")
+  acceptedResponseId String?
+  lockedAt           DateTime?
+  hiddenAt           DateTime?
+  deletedAt          DateTime?
+  views              Int           @default(0)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  author             User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  responses          HelpResponse[]
+
+  @@index([status, createdAt])
+  @@index([category])
+  @@index([city])
+  @@index([authorId])
+}
+
+model HelpResponse {
+  id          String    @id @default(cuid())
+  requestId   String
+  authorId    String
+  body        String
+  isAccepted  Boolean   @default(false)
+  hiddenAt    DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  request     HelpRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  author      User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+}
+
+/// Polymorphic comment thread.
+model Comment {
+  id         String    @id @default(cuid())
+  authorId   String
+  /// help_request | help_response | group_post | resource | opportunity | campaign | student_resource | trip
+  targetType String
+  targetId   String
+  parentId   String?
+  body       String
+  hiddenAt   DateTime?
+  deletedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([targetType, targetId])
+  @@index([authorId])
+}
+
+model Vote {
+  id         String   @id @default(cuid())
+  userId     String
+  /// help_request | help_response | group_post | student_resource
+  targetType String
+  targetId   String
+  value      Int      @default(1)
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, targetType, targetId])
+  @@index([targetType, targetId])
+}
+
+// ===========================================================================
+// Student center
+// ===========================================================================
+
+model Subject {
+  id          String            @id @default(cuid())
+  name        String            @unique
+  description String?
+  /// school | highschool | undergraduate | postgraduate | other
+  level       String            @default("other")
+  resources   StudentResource[]
+  assignments Assignment[]
+  exams       Exam[]
+  timetable   TimetableSlot[]
+  createdAt   DateTime          @default(now())
+}
+
+model StudentResource {
+  id          String    @id @default(cuid())
+  uploaderId  String
+  subjectId   String?
+  title       String
+  description String?
+  level       String    @default("other")
+  language    String    @default("en")
+  /// beginner | intermediate | advanced
+  difficulty  String    @default("beginner")
+  /// pdf | notes | video | link | other
+  fileType    String    @default("notes")
+  institution String?
+  tags        String    @default("")
+  url         String?
+  fileId      String?
+  downloads   Int       @default(0)
+  verified    Boolean   @default(false)
+  /// Number of copyright / inappropriate reports raised against this item.
+  copyrightFlags Int    @default(0)
+  hiddenAt    DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  uploader    User      @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  subject     Subject?  @relation(fields: [subjectId], references: [id])
+
+  @@index([subjectId])
+  @@index([level, difficulty])
+  @@index([uploaderId])
+}
+
+model FlashcardDeck {
+  id          String      @id @default(cuid())
+  ownerId     String
+  name        String
+  description String?
+  subjectId   String?
+  createdAt   DateTime    @default(now())
+  owner       User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  cards       Flashcard[]
+
+  @@index([ownerId])
+}
+
+model Flashcard {
+  id             String        @id @default(cuid())
+  deckId         String
+  ownerId        String
+  front          String
+  back           String
+  hint           String?
+  /// Simple SM-2 lite scheduling
+  repetitions    Int           @default(0)
+  easeFactor     Int           @default(250)
+  intervalDays   Int           @default(0)
+  nextReviewAt   DateTime?
+  lastReviewedAt DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deck           FlashcardDeck @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  owner          User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([deckId])
+  @@index([ownerId, nextReviewAt])
+}
+
+model Assignment {
+  id          String    @id @default(cuid())
+  ownerId     String
+  subjectId   String?
+  title       String
+  description String?
+  dueAt       DateTime
+  /// pending | in_progress | submitted | graded
+  status      String    @default("pending")
+  /// Percentage weight of the final grade
+  weightPct   Float?
+  scorePct    Float?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  subject     Subject?  @relation(fields: [subjectId], references: [id])
+
+  @@index([ownerId, dueAt])
+}
+
+model Exam {
+  id        String    @id @default(cuid())
+  ownerId   String
+  subjectId String?
+  title     String
+  examAt    DateTime
+  location  String?
+  notes     String?
+  createdAt DateTime  @default(now())
+  owner     User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  subject   Subject?  @relation(fields: [subjectId], references: [id])
+
+  @@index([ownerId, examAt])
+}
+
+model TimetableSlot {
+  id        String   @id @default(cuid())
+  ownerId   String
+  subjectId String?
+  title     String
+  /// 0 = Sunday .. 6 = Saturday
+  dayOfWeek Int
+  /// "09:30"
+  startTime String
+  endTime   String
+  room      String?
+  createdAt DateTime @default(now())
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  subject   Subject? @relation(fields: [subjectId], references: [id])
+
+  @@index([ownerId, dayOfWeek])
+}
+
+model CourseGrade {
+  id       String  @id @default(cuid())
+  ownerId  String
+  title    String
+  credits  Float   @default(3)
+  /// Grade point on a 4.0 scale
+  gradePoint Float @default(4)
+  term     String?
+  createdAt DateTime @default(now())
+  owner    User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+}
+
+/// Curated opportunity listing (scholarship | internship | job).
+model Listing {
+  id           String    @id @default(cuid())
+  /// scholarship | internship | job | volunteer
+  kind         String
+  title        String
+  organization String?
+  description  String
+  url          String?
+  location     String?
+  /// Minor units, when a stipend / award amount is known.
+  amountCents  Int?
+  currency     String    @default("USD")
+  deadline     DateTime?
+  level        String?
+  country      String?
+  tags         String    @default("")
+  verified     Boolean   @default(false)
+  published    Boolean   @default(true)
+  createdById  String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([kind, published])
+  @@index([deadline])
+}
+
+// ===========================================================================
+// Skill exchange
+// ===========================================================================
+
+model Skill {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  slug        String       @unique
+  category    String?
+  description String?
+  offers      SkillOffer[]
+  requests    SkillRequest[]
+}
+
+model SkillOffer {
+  id          String   @id @default(cuid())
+  userId      String
+  skillId     String
+  /// beginner | intermediate | advanced | expert
+  level       String   @default("intermediate")
+  /// online | inperson | both
+  format      String   @default("both")
+  description String?
+  availability String?
+  language    String   @default("en")
+  city        String?
+  country     String?
+  radiusKm    Int?
+  /// free | exchange | paid
+  priceMode   String   @default("exchange")
+  priceCents  Int?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill       Skill    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  connections SkillConnection[]
+
+  @@index([skillId, isActive])
+  @@index([userId])
+}
+
+model SkillRequest {
+  id          String   @id @default(cuid())
+  userId      String
+  skillId     String
+  level       String   @default("beginner")
+  format      String   @default("both")
+  description String?
+  availability String?
+  language    String   @default("en")
+  city        String?
+  country     String?
+  radiusKm    Int?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill       Skill    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  connections SkillConnection[]
+
+  @@index([skillId, isActive])
+  @@index([userId])
+}
+
+model SkillConnection {
+  id          String    @id @default(cuid())
+  offerId     String?
+  requestId   String?
+  fromUserId  String
+  toUserId    String
+  message     String?
+  /// pending | accepted | declined | cancelled | completed
+  status      String    @default("pending")
+  meetingAt   DateTime?
+  meetingNote String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  offer       SkillOffer?   @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  request     SkillRequest? @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  fromUser    User      @relation("ConnectionFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser      User      @relation("ConnectionTo", fields: [toUserId], references: [id], onDelete: Cascade)
+  reviews     SkillReview[]
+
+  @@index([toUserId, status])
+  @@index([fromUserId])
+}
+
+model SkillReview {
+  id           String    @id @default(cuid())
+  connectionId String?
+  reviewerId   String
+  revieweeId   String
+  /// 1..5
+  rating       Int
+  comment      String?
+  createdAt    DateTime  @default(now())
+  connection   SkillConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  reviewer     User      @relation("ReviewAuthor", fields: [reviewerId], references: [id], onDelete: Cascade)
+  reviewee     User      @relation("ReviewSubject", fields: [revieweeId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, reviewerId])
+  @@index([revieweeId])
+}
+
+// ===========================================================================
+// Local resources
+// ===========================================================================
+
+model LocalResource {
+  id              String    @id @default(cuid())
+  name            String
+  /// hospital | clinic | pharmacy | blood_bank | library | school | coaching | repair |
+  /// public_toilet | shelter | food_bank | government | emergency | restaurant | accessible |
+  /// donation_center | community_org
+  category        String
+  description     String?
+  address         String?
+  city            String?
+  country         String?
+  latitude        Float?
+  longitude       Float?
+  phone           String?
+  website         String?
+  /// JSON string: [{ "day": "mon", "open": "09:00", "close": "18:00" }]
+  openingHours    String?
+  accessibility   String?
+  /// 0 = free / unknown, 1..3 = price level
+  priceLevel      Int       @default(0)
+  verified        Boolean   @default(false)
+  verifiedById    String?
+  verifiedAt      DateTime?
+  lastConfirmedAt DateTime?
+  submittedById   String
+  /// pending | active | rejected
+  status          String    @default("pending")
+  hiddenAt        DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  submittedBy     User      @relation("ResourceSubmitter", fields: [submittedById], references: [id], onDelete: Cascade)
+  verifiedBy      User?     @relation("ResourceVerifier", fields: [verifiedById], references: [id])
+  reviews         ResourceReview[]
+  suggestions     ResourceEditSuggestion[]
+
+  @@index([category, status])
+  @@index([city])
+}
+
+model ResourceReview {
+  id         String    @id @default(cuid())
+  resourceId String
+  authorId   String
+  /// 1..5
+  rating     Int
+  comment    String?
+  hiddenAt   DateTime?
+  createdAt  DateTime  @default(now())
+  resource   LocalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId])
+}
+
+model ResourceEditSuggestion {
+  id            String    @id @default(cuid())
+  resourceId    String
+  suggestedById String
+  field         String
+  currentValue  String?
+  proposedValue String
+  note          String?
+  /// pending | accepted | rejected
+  status        String    @default("pending")
+  reviewedById  String?
+  createdAt     DateTime  @default(now())
+  resource      LocalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  suggestedBy   User      @relation(fields: [suggestedById], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, status])
+}
+
+// ===========================================================================
+// Volunteer & donations
+// ===========================================================================
+
+model VolunteerOpportunity {
+  id                 String    @id @default(cuid())
+  organizerId        String
+  organizationName   String?
+  title              String
+  description        String
+  cause              String
+  skillsNeeded       String    @default("")
+  itemsNeeded        String    @default("")
+  city               String?
+  country            String?
+  latitude           Float?
+  longitude          Float?
+  startsAt           DateTime?
+  deadline           DateTime?
+  volunteersNeeded   Int       @default(1)
+  status             String    @default("open")
+  verified           Boolean   @default(false)
+  verifiedById       String?
+  hiddenAt           DateTime?
+  deletedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  organizer          User      @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  signups            VolunteerSignup[]
+
+  @@index([status, createdAt])
+  @@index([cause])
+  @@index([city])
+}
+
+model VolunteerSignup {
+  id             String    @id @default(cuid())
+  opportunityId  String
+  userId         String
+  message        String?
+  /// pending | confirmed | declined | cancelled
+  status         String    @default("pending")
+  createdAt      DateTime  @default(now())
+  opportunity    VolunteerOpportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([opportunityId, userId])
+}
+
+model DonationCampaign {
+  id              String    @id @default(cuid())
+  organizerId     String
+  title           String
+  description     String
+  cause           String
+  /// money | goods | food | clothing | blood | other
+  kind            String    @default("goods")
+  goalCents       Int?
+  raisedCents     Int       @default(0)
+  itemsNeeded     String    @default("")
+  city            String?
+  country         String?
+  contactEmail    String?
+  deadline        DateTime?
+  status          String    @default("open")
+  verified        Boolean   @default(false)
+  verifiedById    String?
+  /// Key of a future payment provider adapter (see src/server/services/payments.ts)
+  paymentProvider String?
+  hiddenAt        DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  organizer       User      @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  updates         CampaignUpdate[]
+
+  @@index([status, createdAt])
+  @@index([cause])
+}
+
+model CampaignUpdate {
+  id         String    @id @default(cuid())
+  campaignId String
+  authorId   String
+  title      String
+  body       String
+  createdAt  DateTime  @default(now())
+  campaign   DonationCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+/// Opt-in blood donor directory. Contact details are never published - users are
+/// reached through OpenHub messaging.
+model BloodDonorProfile {
+  id               String    @id @default(cuid())
+  userId           String    @unique
+  bloodGroup       String
+  city             String?
+  country          String?
+  lastDonatedAt    DateTime?
+  /// message | none
+  contactPreference String   @default("message")
+  available        Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([bloodGroup, city])
+}
+
+// ===========================================================================
+// Safety hub
+// ===========================================================================
+
+model EmergencyNumber {
+  id        String   @id @default(cuid())
+  country   String
+  region    String?
+  /// general | police | ambulance | fire | women_helpline | child_helpline | disaster
+  service   String
+  number    String
+  notes     String?
+  source    String?
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([country, service])
+}
+
+model EmergencyContact {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  relation  String?
+  phone     String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Static, editable guide: first_aid | disaster_prep | safety | help | policy | terms | guidelines
+model Guide {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  kind      String
+  title     String
+  body      String
+  locale    String   @default("en")
+  position  Int      @default(0)
+  published Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([kind, published])
+}
+
+model MissingPerson {
+  id               String    @id @default(cuid())
+  reportedById     String
+  name             String
+  age              Int?
+  lastSeenAt       DateTime?
+  lastSeenLocation String?
+  description      String
+  /// Contact is routed through OpenHub, never published directly.
+  contactNote      String?
+  /// open | found | closed
+  status           String    @default("open")
+  verified         Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  reportedBy       User      @relation(fields: [reportedById], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+}
+
+// ===========================================================================
+// Small business tools
+// ===========================================================================
+
+model BusinessProfile {
+  id             String    @id @default(cuid())
+  ownerId        String    @unique
+  name           String
+  slug           String    @unique
+  description    String?
+  logoUrl        String?
+  address        String?
+  city           String?
+  country        String?
+  phone          String?
+  email          String?
+  website        String?
+  taxId          String?
+  /// Tax rate in basis points (1250 = 12.5%)
+  taxRateBp      Int       @default(0)
+  invoicePrefix  String    @default("INV-")
+  invoiceCounter Int       @default(0)
+  currency       String    @default("USD")
+  qrMenuEnabled  Boolean   @default(false)
+  published      Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  owner          User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  services       Service[]
+  customers      Customer[]
+  inventory      InventoryItem[]
+  invoices       Invoice[]
+  appointments   Appointment[]
+  sales          SaleRecord[]
+  cannedMessages CannedMessage[]
+  files          File[]
+}
+
+model Service {
+  id              String    @id @default(cuid())
+  businessId      String
+  name            String
+  description     String?
+  priceCents      Int?
+  durationMinutes Int?
+  position        Int       @default(0)
+  createdAt       DateTime  @default(now())
+  business        BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointments    Appointment[]
+
+  @@index([businessId])
+}
+
+model Customer {
+  id         String    @id @default(cuid())
+  businessId String
+  name       String
+  email      String?
+  phone      String?
+  address    String?
+  notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  business   BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  invoices   Invoice[]
+  appointments Appointment[]
+
+  @@index([businessId])
+}
+
+model InventoryItem {
+  id            String    @id @default(cuid())
+  businessId    String
+  name          String
+  sku           String?
+  category      String?
+  quantity      Int       @default(0)
+  unitCostCents Int       @default(0)
+  priceCents    Int       @default(0)
+  reorderLevel  Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  business      BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+}
+
+model Appointment {
+  id         String    @id @default(cuid())
+  businessId String
+  serviceId  String?
+  customerId String?
+  clientName String
+  clientEmail String?
+  startsAt   DateTime
+  endsAt     DateTime?
+  /// pending | confirmed | completed | cancelled
+  status     String    @default("pending")
+  notes      String?
+  createdAt  DateTime  @default(now())
+  business   BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  service    Service?  @relation(fields: [serviceId], references: [id])
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  @@index([businessId, startsAt])
+}
+
+model Invoice {
+  id            String    @id @default(cuid())
+  businessId    String
+  customerId    String?
+  number        String
+  issueDate     DateTime
+  dueDate       DateTime?
+  /// draft | sent | paid | overdue | void
+  status        String    @default("draft")
+  currency      String    @default("USD")
+  taxRateBp     Int       @default(0)
+  discountCents Int       @default(0)
+  subtotalCents Int       @default(0)
+  taxCents      Int       @default(0)
+  totalCents    Int       @default(0)
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  business      BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer      Customer? @relation(fields: [customerId], references: [id])
+  items         InvoiceItem[]
+
+  @@unique([businessId, number])
+  @@index([businessId, status])
+}
+
+model InvoiceItem {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  description    String
+  quantity       Float   @default(1)
+  unitPriceCents Int     @default(0)
+  totalCents     Int     @default(0)
+  position       Int     @default(0)
+  invoice        Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+model SaleRecord {
+  id         String    @id @default(cuid())
+  businessId String
+  invoiceId  String?
+  amountCents Int
+  currency   String    @default("USD")
+  method     String?
+  soldAt     DateTime  @default(now())
+  notes      String?
+  createdAt  DateTime  @default(now())
+  business   BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, soldAt])
+}
+
+model CannedMessage {
+  id         String    @id @default(cuid())
+  businessId String
+  title      String
+  body       String
+  createdAt  DateTime  @default(now())
+  business   BusinessProfile @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+}
+
+// ===========================================================================
+// Trips & events
+// ===========================================================================
+
+model Trip {
+  id                String    @id @default(cuid())
+  ownerId           String
+  title             String
+  description       String?
+  destination       String?
+  startsAt          DateTime?
+  endsAt            DateTime?
+  /// private | public
+  visibility        String    @default("private")
+  budgetCents       Int?
+  currency          String    @default("USD")
+  accommodationNotes String?
+  transportNotes    String?
+  mapLinks          String    @default("")
+  importantContacts String?
+  deletedAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  owner             User      @relation("TripOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members           TripMember[]
+  itinerary         ItineraryItem[]
+  packing           PackingItem[]
+  expenses          Expense[]
+  events            CalendarEvent[]
+  polls             Poll[]
+  files             File[]
+
+  @@index([ownerId])
+  @@index([visibility])
+}
+
+model TripMember {
+  id       String   @id @default(cuid())
+  tripId   String
+  userId   String
+  /// organizer | member
+  role     String   @default("member")
+  joinedAt DateTime @default(now())
+  trip     Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, userId])
+}
+
+model ItineraryItem {
+  id          String    @id @default(cuid())
+  tripId      String
+  addedById   String
+  title       String
+  description String?
+  location    String?
+  startsAt    DateTime?
+  endsAt      DateTime?
+  costCents   Int?
+  position    Int       @default(0)
+  createdAt   DateTime  @default(now())
+  trip        Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  addedBy     User      @relation(fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@index([tripId, position])
+}
+
+model PackingItem {
+  id        String    @id @default(cuid())
+  tripId    String
+  addedById String
+  label     String
+  category  String?
+  packedAt  DateTime?
+  createdAt DateTime  @default(now())
+  trip      Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  addedBy   User      @relation(fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+}
+
+// ===========================================================================
+// Shared money (personal, group and trip expenses)
+// ===========================================================================
+
+model Expense {
+  id          String    @id @default(cuid())
+  ownerId     String
+  groupId     String?
+  tripId      String?
+  businessId  String?
+  category    String
+  description String?
+  amountCents Int
+  currency    String    @default("USD")
+  occurredOn  DateTime  @default(now())
+  /// Whether this expense is shared with the group / trip participants.
+  isShared    Boolean   @default(false)
+  fileId      String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  group       Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trip        Trip?     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  splits      ExpenseSplit[]
+
+  @@index([ownerId, occurredOn])
+  @@index([groupId])
+  @@index([tripId])
+  @@index([businessId])
+}
+
+model ExpenseSplit {
+  id         String    @id @default(cuid())
+  expenseId  String
+  userId     String
+  /// What this person owes for this expense.
+  shareCents Int       @default(0)
+  settledAt  DateTime?
+  expense    Expense   @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+}
+
+// ===========================================================================
+// Polls (groups + trips)
+// ===========================================================================
+
+model Poll {
+  id        String    @id @default(cuid())
+  groupId   String?
+  tripId    String?
+  authorId  String
+  question  String
+  multi     Boolean   @default(false)
+  closesAt  DateTime?
+  createdAt DateTime  @default(now())
+  group     Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trip      Trip?     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  options   PollOption[]
+
+  @@index([groupId])
+  @@index([tripId])
+}
+
+model PollOption {
+  id     String     @id @default(cuid())
+  pollId String
+  label  String
+  position Int      @default(0)
+  poll   Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes  PollVote[]
+
+  @@index([pollId])
+}
+
+model PollVote {
+  id       String   @id @default(cuid())
+  optionId String
+  userId   String
+  createdAt DateTime @default(now())
+  option   PollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([optionId, userId])
+  @@index([userId])
+}
+
+// ===========================================================================
+// Messaging, notifications, search, moderation
+// ===========================================================================
+
+model Conversation {
+  id           String    @id @default(cuid())
+  /// direct | group
+  kind         String    @default("direct")
+  groupId      String?
+  title        String?
+  lastMessageAt DateTime @default(now())
+  createdAt    DateTime  @default(now())
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([lastMessageAt])
+}
+
+model ConversationParticipant {
+  id             String    @id @default(cuid())
+  conversationId String
+  userId         String
+  lastReadAt     DateTime?
+  hiddenAt       DateTime?
+  createdAt      DateTime  @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String    @id @default(cuid())
+  conversationId String
+  senderId       String
+  body           String
+  deletedAt      DateTime?
+  hiddenAt       DateTime?
+  createdAt      DateTime  @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         User      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model Notification {
+  id         String    @id @default(cuid())
+  userId     String
+  /// group_invite | join_request | comment | answer | skill_request | event_reminder |
+  /// task_reminder | moderation | volunteer_signup | resource_update | message | system
+  type       String
+  title      String
+  body       String?
+  targetType String?
+  targetId   String?
+  link       String?
+  readAt     DateTime?
+  emailedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+model NotificationPreference {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  inAppEnabled   Boolean  @default(true)
+  emailEnabled   Boolean  @default(false)
+  /// instant | daily | weekly | off
+  digestMode     String   @default("instant")
+  /// CSV of notification types the user muted
+  disabledTypes  String   @default("")
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Report {
+  id           String    @id @default(cuid())
+  reporterId   String
+  /// help_request | help_response | comment | group_post | user | resource | opportunity |
+  /// campaign | skill_offer | skill_request | message | student_resource | missing_person
+  targetType   String
+  targetId     String
+  /// spam | harassment | misinformation | copyright | scam | other
+  reason       String
+  details      String?
+  /// open | reviewed | actioned | dismissed
+  status       String    @default("open")
+  resolution   String?
+  reviewedById String?
+  reviewedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  reporter     User      @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reviewedBy   User?     @relation("Reviewer", fields: [reviewedById], references: [id])
+
+  @@index([status, createdAt])
+  @@index([targetType, targetId])
+}
+
+model ModerationAction {
+  id          String   @id @default(cuid())
+  moderatorId String
+  /// hide | restore | warn | suspend | reinstate | verify | lock | unlock | delete
+  action      String
+  targetType  String
+  targetId    String
+  note        String?
+  createdAt   DateTime @default(now())
+  moderator   User     @relation(fields: [moderatorId], references: [id], onDelete: Cascade)
+
+  @@index([targetType, targetId])
+  @@index([moderatorId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorEmail String?
+  action     String
+  targetType String?
+  targetId   String?
+  /// JSON string with extra context
+  metadata   String?
+  ipHash     String?
+  createdAt  DateTime @default(now())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([actorId])
+}
+
+model SavedItem {
+  id         String   @id @default(cuid())
+  userId     String
+  targetType String
+  targetId   String
+  note       String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, targetType, targetId])
+}
+
+model ActivityLog {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String
+  description String
+  targetType  String?
+  targetId    String?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model UserBlock {
+  id         String   @id @default(cuid())
+  blockerId  String
+  blockedId  String
+  reason     String?
+  createdAt  DateTime @default(now())
+  blocker    User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked    User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+}
+
+/// Admin controlled taxonomy (help categories, resource categories, causes, group kinds).
+model Category {
+  id          String   @id @default(cuid())
+  /// help | resource | cause | group | expense | skill
+  kind        String
+  key         String
+  label       String
+  description String?
+  icon        String?
+  position    Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@unique([kind, key])
+}
+
+model SiteSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model File {
+  id           String    @id @default(cuid())
+  ownerId      String
+  groupId      String?
+  tripId       String?
+  businessId   String?
+  targetType   String?
+  targetId     String?
+  /// Sanitised on-disk name (never user controlled directly)
+  storedName   String
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  sha256       String?
+  /// local | s3 (see src/server/services/storage.ts)
+  storage      String    @default("local")
+  storageKey   String
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  owner        User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  group        Group?    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trip         Trip?     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  business     BusinessProfile? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+  @@index([targetType, targetId])
+}
