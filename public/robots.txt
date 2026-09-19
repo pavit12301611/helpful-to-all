@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+
+# Private areas are never indexed: they require a session, but be explicit.
+Disallow: /dashboard
+Disallow: /tasks
+Disallow: /notes
+Disallow: /messages
+Disallow: /settings
+Disallow: /admin

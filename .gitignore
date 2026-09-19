@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next.js
+.next/
+out/
+build/
+next-env.d.ts
+
+# production
+dist/
+
+# generated Prisma client (run `npm run db:generate`)
+src/generated/
+
+# databases (local development)
+*.db
+*.db-journal
+prisma/dev.db*
+prisma/test.db*
+
+# environment
+.env
+.env.*.local
+!.env.example
+
+# testing
+coverage/
+playwright-report/
+test-results/
+.blob-report/
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+yarn-error.log*
+.idea/
+.vscode/
+*.tsbuildinfo
+
+# uploads (local storage adapter)
+storage/uploads/
